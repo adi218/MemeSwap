@@ -115,20 +115,14 @@ export default function Home() {
         <div className="mb-8 max-w-4xl mx-auto">
           <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
             <h3 className="text-lg font-semibold text-gray-800 mb-3">
-              🤖 AI Model Selection
+              🤖 YOLO Face Detection with Pose Estimation
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-              <div className="p-3 bg-blue-50 rounded-lg">
-                <h4 className="font-medium text-blue-800">MediaPipe Standard</h4>
-                <p className="text-blue-600 text-xs mt-1">Fast detection with basic bounding boxes</p>
-              </div>
-              <div className="p-3 bg-green-50 rounded-lg">
-                <h4 className="font-medium text-green-800">MediaPipe Enhanced</h4>
-                <p className="text-green-600 text-xs mt-1">468 landmarks including hair and ears</p>
-              </div>
+            <div className="grid grid-cols-1 gap-4 text-sm">
               <div className="p-3 bg-purple-50 rounded-lg">
-                <h4 className="font-medium text-purple-800">YOLO Detection</h4>
-                <p className="text-purple-600 text-xs mt-1">Robust detection for various angles</p>
+                <h4 className="font-medium text-purple-800">YOLO Face Detection</h4>
+                <p className="text-purple-600 text-xs mt-1">Robust detection with pose analysis</p>
+                <p className="text-purple-500 text-xs mt-1">Best for face swapping and various angles</p>
+                <p className="text-purple-500 text-xs mt-1">Includes hair and ears in detection</p>
               </div>
             </div>
           </div>
@@ -185,11 +179,22 @@ export default function Home() {
                     Target GIF
                   </h3>
                   <div className="bg-white rounded-lg border border-gray-200 p-4">
-                    <img
-                      src={selectedGif.url}
-                      alt={selectedGif.title || 'Selected GIF'}
-                      className="w-full h-48 object-cover rounded-lg"
-                    />
+                    <div className="relative">
+                      <img
+                        src={selectedGif.url}
+                        alt={selectedGif.title || 'Selected GIF'}
+                        className="w-full h-auto max-h-48 object-contain rounded-lg"
+                        style={{
+                          maxWidth: '100%',
+                          height: 'auto'
+                        }}
+                      />
+                      {selectedGif.width && selectedGif.height && (
+                        <div className="mt-2 text-xs text-gray-500 text-center">
+                          GIF dimensions: {selectedGif.width} × {selectedGif.height}px
+                        </div>
+                      )}
+                    </div>
                     <p className="text-sm text-gray-600 mt-2 truncate">
                       {selectedGif.title || 'Selected GIF'}
                     </p>

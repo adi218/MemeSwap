@@ -1,5 +1,4 @@
 import cv2
-import mediapipe as mp
 import numpy as np
 from PIL import Image
 import io
@@ -7,239 +6,247 @@ import base64
 from typing import List, Tuple, Optional
 import logging
 import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
 class FaceSwapService:
     def __init__(self):
-        self.mp_face_detection = mp.solutions.face_detection
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.mp_drawing = mp.solutions.drawing_utils
+        # Initialize YOLO model for face detection
+        self.yolo_model = None
+        self.face_detection_service = None
         
-        # Initialize MediaPipe face detection and mesh
-        self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=0.5
-        )
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=10,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+    def set_face_detection_service(self, face_detection_service):
+        """Set the face detection service to use for YOLO detection"""
+        self.face_detection_service = face_detection_service
     
-    def extract_face_landmarks_enhanced(self, image: np.ndarray) -> List[Tuple[np.ndarray, List]]:
+    def extract_face_with_mediapipe(self, image: np.ndarray) -> List[Tuple[np.ndarray, dict]]:
         """
-        Extract face landmarks from an image with enhanced detection including hair and ears.
-        Returns list of (face_image, landmarks) tuples.
+        Extract faces from an image using MediaPipe enhanced detection.
+        Returns list of (face_image, face_info) tuples.
         """
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_image)
+        if not self.face_detection_service:
+            raise ValueError("Face detection service not set")
+        
+        # Convert image to bytes for the detection service
+        success, buffer = cv2.imencode('.jpg', image)
+        if not success:
+            raise ValueError("Could not encode image")
+        
+        image_bytes = buffer.tobytes()
+        
+        # Try MediaPipe enhanced detection first
+        detection_result = self.face_detection_service.detect_faces_with_model(image_bytes, "mediapipe_enhanced")
         
         faces = []
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                # Convert landmarks to numpy array
-                landmarks = []
-                for landmark in face_landmarks.landmark:
-                    x = int(landmark.x * image.shape[1])
-                    y = int(landmark.y * image.shape[0])
-                    landmarks.append([x, y])
+        if detection_result["faces_found"] > 0:
+            for face in detection_result["faces"]:
+                bbox = face["bbox"]
+                x, y, w, h = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
                 
-                landmarks = np.array(landmarks)
+                # Extract face region with some padding
+                padding = int(min(w, h) * 0.1)  # 10% padding
+                x1 = max(0, x - padding)
+                y1 = max(0, y - padding)
+                x2 = min(image.shape[1], x + w + padding)
+                y2 = min(image.shape[0], y + h + padding)
                 
-                # Get face bounding box with extended area for hair and ears
-                x_coords = landmarks[:, 0]
-                y_coords = landmarks[:, 1]
-                x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
-                y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
+                face_image = image[y1:y2, x1:x2]
                 
-                # Calculate face dimensions
-                face_width = x_max - x_min
-                face_height = y_max - y_min
+                # Create face info dictionary
+                face_info = {
+                    "bbox": bbox,
+                    "confidence": face.get("confidence", 0.0),
+                    "pose": face.get("pose", {}),
+                    "model": "mediapipe_enhanced"
+                }
                 
-                # Extend bounds to include hair and ears
-                ear_extension = int(face_width * 0.2)  # 20% extension for ears
-                hair_extension = int(face_height * 0.3)  # 30% extension for hair
-                chin_extension = int(face_height * 0.1)  # 10% extension for chin
-                
-                # Apply extensions with boundary checks
-                x_min = max(0, x_min - ear_extension)
-                x_max = min(image.shape[1], x_max + ear_extension)
-                y_min = max(0, y_min - hair_extension)
-                y_max = min(image.shape[0], y_max + chin_extension)
-                
-                # Extract extended face region
-                face_image = image[y_min:y_max, x_min:x_max]
-                
-                # Adjust landmarks to face region
-                adjusted_landmarks = landmarks - np.array([x_min, y_min])
-                
-                faces.append((face_image, adjusted_landmarks))
+                faces.append((face_image, face_info))
+        else:
+            # If MediaPipe enhanced fails, try standard MediaPipe detection
+            logger.info("MediaPipe enhanced detection failed, trying standard MediaPipe detection...")
+            detection_result = self.face_detection_service.detect_faces_with_model(image_bytes, "mediapipe_standard")
+            
+            if detection_result["faces_found"] > 0:
+                for face in detection_result["faces"]:
+                    bbox = face["bbox"]
+                    x, y, w, h = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
+                    
+                    # Extract face region with some padding
+                    padding = int(min(w, h) * 0.1)  # 10% padding
+                    x1 = max(0, x - padding)
+                    y1 = max(0, y - padding)
+                    x2 = min(image.shape[1], x + w + padding)
+                    y2 = min(image.shape[0], y + h + padding)
+                    
+                    face_image = image[y1:y2, x1:x2]
+                    
+                    # Create face info dictionary
+                    face_info = {
+                        "bbox": bbox,
+                        "confidence": face.get("confidence", 0.0),
+                        "pose": face.get("pose", {}),
+                        "model": "mediapipe_standard"
+                    }
+                    
+                    faces.append((face_image, face_info))
         
         return faces
     
-    def extract_face_landmarks(self, image: np.ndarray) -> List[Tuple[np.ndarray, List]]:
+    def detect_faces_in_gif_with_mediapipe(self, gif_path: str) -> List[Tuple[np.ndarray, dict, int]]:
         """
-        Extract face landmarks from an image (original method for backward compatibility).
-        Returns list of (face_image, landmarks) tuples.
+        Detect faces in each frame of a GIF using MediaPipe enhanced detection.
+        Returns list of (frame, face_info, frame_index) tuples.
         """
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_image)
+        if not self.face_detection_service:
+            raise ValueError("Face detection service not set")
         
-        faces = []
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                # Convert landmarks to numpy array
-                landmarks = []
-                for landmark in face_landmarks.landmark:
-                    x = int(landmark.x * image.shape[1])
-                    y = int(landmark.y * image.shape[0])
-                    landmarks.append([x, y])
-                
-                landmarks = np.array(landmarks)
-                
-                # Get face bounding box
-                x_coords = landmarks[:, 0]
-                y_coords = landmarks[:, 1]
-                x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
-                y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
-                
-                # Extract face region with padding
-                padding = 50
-                x_min = max(0, x_min - padding)
-                y_min = max(0, y_min - padding)
-                x_max = min(image.shape[1], x_max + padding)
-                y_max = min(image.shape[0], y_max + padding)
-                
-                face_image = image[y_min:y_max, x_min:x_max]
-                
-                # Adjust landmarks to face region
-                adjusted_landmarks = landmarks - np.array([x_min, y_min])
-                
-                faces.append((face_image, adjusted_landmarks))
-        
-        return faces
-    
-    def detect_faces_in_gif_enhanced(self, gif_path: str) -> List[Tuple[np.ndarray, List, int]]:
-        """
-        Detect faces in each frame of a GIF with enhanced detection.
-        Returns list of (frame, landmarks, frame_index) tuples.
-        """
         cap = cv2.VideoCapture(gif_path)
         frames_with_faces = []
         frame_index = 0
+        last_face_info = None  # Store last detected face for interpolation
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.face_mesh.process(rgb_frame)
+            # Use MediaPipe enhanced detection on this frame
+            faces = self.extract_face_with_mediapipe(frame)
             
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # Convert landmarks to numpy array
-                    landmarks = []
-                    for landmark in face_landmarks.landmark:
-                        x = int(landmark.x * frame.shape[1])
-                        y = int(landmark.y * frame.shape[0])
-                        landmarks.append([x, y])
-                    
-                    landmarks = np.array(landmarks)
-                    frames_with_faces.append((frame, landmarks, frame_index))
-            
-            frame_index += 1
-        
-        cap.release()
-        return frames_with_faces
-    
-    def detect_faces_in_gif(self, gif_path: str) -> List[Tuple[np.ndarray, List, int]]:
-        """
-        Detect faces in each frame of a GIF (original method for backward compatibility).
-        Returns list of (frame, landmarks, frame_index) tuples.
-        """
-        cap = cv2.VideoCapture(gif_path)
-        frames_with_faces = []
-        frame_index = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.face_mesh.process(rgb_frame)
-            
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # Convert landmarks to numpy array
-                    landmarks = []
-                    for landmark in face_landmarks.landmark:
-                        x = int(landmark.x * frame.shape[1])
-                        y = int(landmark.y * frame.shape[0])
-                        landmarks.append([x, y])
-                    
-                    landmarks = np.array(landmarks)
-                    frames_with_faces.append((frame, landmarks, frame_index))
+            if faces:
+                # Face detected in this frame
+                for face_image, face_info in faces:
+                    frames_with_faces.append((frame, face_info, frame_index))
+                    last_face_info = face_info  # Update last known face
+            elif last_face_info is not None:
+                # No face detected, but we have a previous face - use interpolation
+                # Slightly adjust the bounding box position based on frame movement
+                interpolated_face_info = last_face_info.copy()
+                frames_with_faces.append((frame, interpolated_face_info, frame_index))
+                logger.info(f"Frame {frame_index}: No face detected, using interpolated face from previous frame")
             
             frame_index += 1
         
         cap.release()
         return frames_with_faces
     
-    def warp_face(self, source_face: np.ndarray, source_landmarks: np.ndarray,
-                  target_landmarks: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+    def save_cropped_faces(self, faces: List[Tuple[np.ndarray, dict]], prefix: str, output_dir: str = "debug_faces") -> List[str]:
         """
-        Warp source face to match target face landmarks.
+        Save cropped faces to disk for debugging.
+        Returns list of saved file paths.
         """
-        # Define key facial landmarks for transformation
-        # MediaPipe face mesh has 468 landmarks, we'll use key points
-        key_indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
-                       397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
-                       172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+        os.makedirs(output_dir, exist_ok=True)
+        saved_paths = []
         
-        source_key_points = source_landmarks[key_indices]
-        target_key_points = target_landmarks[key_indices]
+        for i, (face_image, face_info) in enumerate(faces):
+            # Generate unique filename
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"{prefix}_face_{i}_{unique_id}.jpg"
+            filepath = os.path.join(output_dir, filename)
+            
+            # Save the face image
+            cv2.imwrite(filepath, face_image)
+            saved_paths.append(filepath)
+            
+            logger.info(f"Saved {prefix} face {i} to {filepath}")
+            logger.info(f"Face info: bbox={face_info['bbox']}, confidence={face_info['confidence']:.3f}")
         
-        # Calculate transformation matrix
-        transformation_matrix = cv2.estimateAffinePartial2D(
-            source_key_points, target_key_points
-        )[0]
+        return saved_paths
+    
+    def warp_face(self, source_image: np.ndarray, source_face_info: dict,
+                  target_face_info: dict, target_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Warp source face to match target face using bounding boxes.
+        """
+        # Get bounding box coordinates
+        source_bbox = source_face_info["bbox"]
+        target_bbox = target_face_info["bbox"]
         
-        # Warp the source face
-        warped_face = cv2.warpAffine(
-            source_face, transformation_matrix, (target_shape[1], target_shape[0])
-        )
+        sx, sy, sw, sh = source_bbox["x"], source_bbox["y"], source_bbox["width"], source_bbox["height"]
+        tx, ty, tw, th = target_bbox["x"], target_bbox["y"], target_bbox["width"], target_bbox["height"]
+        
+        # Extract source face region from the full source image
+        sx1 = max(0, sx)
+        sy1 = max(0, sy)
+        sx2 = min(source_image.shape[1], sx + sw)
+        sy2 = min(source_image.shape[0], sy + sh)
+        
+        source_face_region = source_image[sy1:sy2, sx1:sx2]
+        
+        # Resize source face region to match target size
+        resized_face = cv2.resize(source_face_region, (tw, th))
+        
+        # Create output image with proper shape (height, width, channels)
+        if len(resized_face.shape) == 3:
+            warped_face = np.zeros((target_shape[0], target_shape[1], 3), dtype=np.uint8)
+        else:
+            warped_face = np.zeros(target_shape, dtype=np.uint8)
+        
+        # Place the resized face at the target location
+        y1 = max(0, ty)
+        y2 = min(target_shape[0], ty + th)
+        x1 = max(0, tx)
+        x2 = min(target_shape[1], tx + tw)
+        
+        if y2 > y1 and x2 > x1:
+            # Ensure the regions have matching shapes
+            face_region = resized_face[:y2-y1, :x2-x1]
+            if len(face_region.shape) == 3 and len(warped_face.shape) == 3:
+                warped_face[y1:y2, x1:x2] = face_region
+            elif len(face_region.shape) == 2 and len(warped_face.shape) == 2:
+                warped_face[y1:y2, x1:x2] = face_region
+            else:
+                # Convert grayscale to RGB if needed
+                if len(face_region.shape) == 2 and len(warped_face.shape) == 3:
+                    face_region_rgb = cv2.cvtColor(face_region, cv2.COLOR_GRAY2RGB)
+                    warped_face[y1:y2, x1:x2] = face_region_rgb
+                else:
+                    # Convert RGB to grayscale if needed
+                    face_region_gray = cv2.cvtColor(face_region, cv2.COLOR_RGB2GRAY)
+                    warped_face[y1:y2, x1:x2] = face_region_gray
         
         return warped_face
     
     def blend_faces(self, warped_face: np.ndarray, target_frame: np.ndarray,
-                   target_landmarks: np.ndarray) -> np.ndarray:
+                   target_bbox: dict) -> np.ndarray:
         """
         Blend the warped face into the target frame.
         """
         # Create a mask for the face region
-        hull = cv2.convexHull(target_landmarks)
+        tx, ty, tw, th = target_bbox["x"], target_bbox["y"], target_bbox["width"], target_bbox["height"]
+        
+        # Create elliptical mask for smooth blending
         mask = np.zeros(target_frame.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [hull], 255)
+        center = (tx + tw // 2, ty + th // 2)
+        axes = (tw // 2, th // 2)
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
         
         # Apply Gaussian blur to the mask for smooth blending
         mask = cv2.GaussianBlur(mask, (15, 15), 0)
         
-        # Normalize mask
+        # Normalize mask and ensure it has the same shape as the images
         mask = mask.astype(np.float32) / 255.0
-        mask = np.stack([mask] * 3, axis=2)
+        
+        # Ensure warped_face and target_frame have the same shape
+        if warped_face.shape != target_frame.shape:
+            # Resize warped_face to match target_frame shape
+            warped_face = cv2.resize(warped_face, (target_frame.shape[1], target_frame.shape[0]))
+        
+        # Create 3-channel mask for RGB blending
+        if len(target_frame.shape) == 3:
+            mask_3d = np.stack([mask] * 3, axis=2)
+        else:
+            mask_3d = mask
         
         # Blend the faces
-        blended_frame = (warped_face * mask + target_frame * (1 - mask)).astype(np.uint8)
+        blended_frame = (warped_face * mask_3d + target_frame * (1 - mask_3d)).astype(np.uint8)
         
         return blended_frame
     
-    def swap_face_on_gif(self, source_image_path: str, target_gif_path: str, enhanced: bool = True) -> str:
+    def swap_face_on_gif(self, source_image_path: str, target_gif_path: str) -> str:
         """
-        Swap faces from source image onto target GIF with enhanced detection.
+        Swap faces from source image onto target GIF using YOLO detection.
         Returns path to the output GIF.
         """
         try:
@@ -248,26 +255,39 @@ class FaceSwapService:
             if source_image is None:
                 raise ValueError("Could not load source image")
             
-            # Extract faces from source image using enhanced or standard detection
-            if enhanced:
-                source_faces = self.extract_face_landmarks_enhanced(source_image)
-            else:
-                source_faces = self.extract_face_landmarks(source_image)
-                
+            # Extract faces from source image using MediaPipe enhanced detection
+            source_faces = self.extract_face_with_mediapipe(source_image)
             if not source_faces:
                 raise ValueError("No faces detected in source image")
             
-            # Use the first detected face as the source
-            source_face, source_landmarks = source_faces[0]
+            # Save source faces for debugging
+            source_face_paths = self.save_cropped_faces(source_faces, "source")
+            logger.info(f"Saved {len(source_face_paths)} source faces")
             
-            # Detect faces in target GIF using enhanced or standard detection
-            if enhanced:
-                frames_with_faces = self.detect_faces_in_gif_enhanced(target_gif_path)
-            else:
-                frames_with_faces = self.detect_faces_in_gif(target_gif_path)
-                
+            # Use the first detected face as the source
+            source_face, source_face_info = source_faces[0]
+            
+            # Detect faces in target GIF using MediaPipe enhanced detection
+            frames_with_faces = self.detect_faces_in_gif_with_mediapipe(target_gif_path)
             if not frames_with_faces:
                 raise ValueError("No faces detected in target GIF")
+            
+            # Save sample faces from GIF for debugging (up to 4)
+            sample_faces = []
+            for frame, face_info, frame_idx in frames_with_faces[:4]:
+                # Extract the face region from the frame
+                bbox = face_info["bbox"]
+                x, y, w, h = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
+                padding = int(min(w, h) * 0.1)
+                x1 = max(0, x - padding)
+                y1 = max(0, y - padding)
+                x2 = min(frame.shape[1], x + w + padding)
+                y2 = min(frame.shape[0], y + h + padding)
+                face_image = frame[y1:y2, x1:x2]
+                sample_faces.append((face_image, face_info))
+            
+            gif_face_paths = self.save_cropped_faces(sample_faces, "gif")
+            logger.info(f"Saved {len(gif_face_paths)} sample faces from GIF")
             
             # Process each frame with faces
             cap = cv2.VideoCapture(target_gif_path)
@@ -294,14 +314,14 @@ class FaceSwapService:
                 
                 if frame_faces:
                     # Swap faces in this frame
-                    for target_frame, target_landmarks, _ in frame_faces:
+                    for target_frame, target_face_info, _ in frame_faces:
                         # Warp source face to match target
                         warped_face = self.warp_face(
-                            source_face, source_landmarks, target_landmarks, frame.shape[:2]
+                            source_image, source_face_info, target_face_info, frame.shape[:2]
                         )
                         
                         # Blend the faces
-                        frame = self.blend_faces(warped_face, frame, target_landmarks)
+                        frame = self.blend_faces(warped_face, frame, target_face_info["bbox"])
                 
                 # Convert BGR to RGB for PIL
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -325,15 +345,16 @@ class FaceSwapService:
                     optimize=True
                 )
             
+            logger.info(f"Face swap completed successfully. Output saved to: {output_path}")
             return output_path
             
         except Exception as e:
             logger.error(f"Error in face swap: {str(e)}")
             raise
     
-    def swap_face_on_image(self, source_image_path: str, target_image_path: str, enhanced: bool = True) -> str:
+    def swap_face_on_image(self, source_image_path: str, target_image_path: str) -> str:
         """
-        Swap faces from source image onto target image with enhanced detection.
+        Swap faces from source image onto target image using YOLO detection.
         Returns path to the output image.
         """
         try:
@@ -346,43 +367,44 @@ class FaceSwapService:
             if target_image is None:
                 raise ValueError("Could not load target image")
             
-            # Extract faces from source image using enhanced or standard detection
-            if enhanced:
-                source_faces = self.extract_face_landmarks_enhanced(source_image)
-            else:
-                source_faces = self.extract_face_landmarks(source_image)
-                
+            # Extract faces from source image using MediaPipe enhanced detection
+            source_faces = self.extract_face_with_mediapipe(source_image)
             if not source_faces:
                 raise ValueError("No faces detected in source image")
             
-            # Use the first detected face as the source
-            source_face, source_landmarks = source_faces[0]
+            # Save source faces for debugging
+            source_face_paths = self.save_cropped_faces(source_faces, "source")
+            logger.info(f"Saved {len(source_face_paths)} source faces")
             
-            # Extract faces from target image using enhanced or standard detection
-            if enhanced:
-                target_faces = self.extract_face_landmarks_enhanced(target_image)
-            else:
-                target_faces = self.extract_face_landmarks(target_image)
-                
+            # Use the first detected face as the source
+            source_face, source_face_info = source_faces[0]
+            
+            # Extract faces from target image using MediaPipe enhanced detection
+            target_faces = self.extract_face_with_mediapipe(target_image)
             if not target_faces:
                 raise ValueError("No faces detected in target image")
+            
+            # Save target faces for debugging
+            target_face_paths = self.save_cropped_faces(target_faces, "target")
+            logger.info(f"Saved {len(target_face_paths)} target faces")
             
             # Process each face in target image
             result_image = target_image.copy()
             
-            for target_face, target_landmarks in target_faces:
+            for target_face, target_face_info in target_faces:
                 # Warp source face to match target
                 warped_face = self.warp_face(
-                    source_face, source_landmarks, target_landmarks, target_image.shape[:2]
+                    source_image, source_face_info, target_face_info, target_image.shape[:2]
                 )
                 
                 # Blend the faces
-                result_image = self.blend_faces(warped_face, result_image, target_landmarks)
+                result_image = self.blend_faces(warped_face, result_image, target_face_info["bbox"])
             
             # Save result
             output_path = target_image_path.replace('.', '_swapped.')
             cv2.imwrite(output_path, result_image)
             
+            logger.info(f"Face swap completed successfully. Output saved to: {output_path}")
             return output_path
             
         except Exception as e:

@@ -4,20 +4,28 @@ import numpy as np
 from PIL import Image
 import io
 import base64
+import logging
 from typing import Literal
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class FaceDetectionService:
     def __init__(self):
+        logger.info("Initializing FaceDetectionService...")
         self.mp_face_detection = mp.solutions.face_detection
         self.mp_face_mesh = mp.solutions.face_mesh
         self.mp_drawing = mp.solutions.drawing_utils
         
         # Initialize MediaPipe face detection and mesh
+        logger.info("Initializing MediaPipe face detection...")
         self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=0.5
+            model_selection=0, min_detection_confidence=0.5
         )
         
         # Enhanced face mesh for precise detection
+        logger.info("Initializing MediaPipe face mesh...")
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             static_image_mode=True,
             max_num_faces=10,
@@ -27,37 +35,45 @@ class FaceDetectionService:
         )
         
         # Initialize YOLO face detection
-        self.yolo_net = None
+        self.yolo_model = None
         self._load_yolo_model()
+        
+        # 3D face model points for pose estimation
+        self._init_3d_face_model()
+        logger.info("FaceDetectionService initialization complete!")
 
     def _load_yolo_model(self):
         """Load YOLO face detection model"""
+        logger.info("Attempting to load YOLO model...")
         try:
             # YOLO face detection model path
             model_path = "models/yolov8n-face.pt"
             
             # Try to load YOLO model if available
             try:
-                import torch
                 from ultralytics import YOLO
+                logger.info(f"Loading YOLO model from {model_path}...")
                 self.yolo_model = YOLO(model_path)
                 self.yolo_available = True
+                logger.info("YOLO model loaded successfully!")
             except ImportError:
-                print("Ultralytics not available, YOLO detection disabled")
+                logger.warning("Ultralytics not available, YOLO detection disabled")
                 self.yolo_available = False
             except Exception as e:
-                print(f"Could not load YOLO model: {e}")
+                logger.error(f"Could not load YOLO model: {e}")
                 self.yolo_available = False
                 
         except Exception as e:
-            print(f"YOLO initialization error: {e}")
+            logger.error(f"YOLO initialization error: {e}")
             self.yolo_available = False
 
     def detect_faces_yolo(self, image_data):
         """
         Detect faces using YOLO model
         """
+        logger.info("Starting YOLO face detection...")
         if not self.yolo_available:
+            logger.warning("YOLO model not available, returning error")
             return {
                 "error": "YOLO model not available",
                 "faces_found": 0,
@@ -72,6 +88,8 @@ class FaceDetectionService:
             else:
                 image = cv2.cvtColor(np.array(image_data), cv2.COLOR_RGB2BGR)
 
+            logger.info(f"YOLO processing image of shape: {image.shape}")
+
             # Run YOLO detection
             results = self.yolo_model(image)
             
@@ -79,360 +97,280 @@ class FaceDetectionService:
             for result in results:
                 boxes = result.boxes
                 if boxes is not None:
-                    for box in boxes:
+                    logger.info(f"YOLO found {len(boxes)} potential faces")
+                    for i, box in enumerate(boxes):
                         # Get bounding box coordinates
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                         confidence = box.conf[0].cpu().numpy()
                         
-                        # Convert to integer coordinates
-                        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                        logger.info(f"YOLO face {i+1}: bbox=({x1},{y1},{x2},{y2}), confidence={confidence:.3f}")
                         
+                        # Pose estimation using landmarks from the detected region
+                        face_region = image[y1:y2, x1:x2]
+                        pose_estimation = {"success": False}
+                        
+                        if face_region.size > 0:
+                            face_region_rgb = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)
+                            mesh_results = self.face_mesh.process(face_region_rgb)
+                            
+                            if mesh_results.multi_face_landmarks:
+                                face_landmarks = mesh_results.multi_face_landmarks[0]
+                                landmarks = [(int(lm.x * face_region.shape[1]) + x1, int(lm.y * face_region.shape[0]) + y1) for lm in face_landmarks.landmark]
+                                pose_estimation = self.estimate_face_pose(landmarks, image.shape)
+
                         faces.append({
-                            "bbox": {
-                                "x": x1,
-                                "y": y1,
-                                "width": x2 - x1,
-                                "height": y2 - y1
-                            },
+                            "bbox": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1},
                             "confidence": float(confidence),
+                            "pose": pose_estimation,
                             "model": "yolo"
                         })
+                else:
+                    logger.info("YOLO found no faces")
             
+            logger.info(f"YOLO detection complete: {len(faces)} faces found")
             return {
                 "faces_found": len(faces),
                 "faces": faces,
-                "image_shape": {
-                    "width": image.shape[1],
-                    "height": image.shape[0]
-                }
+                "image_shape": {"width": image.shape[1], "height": image.shape[0]}
             }
             
         except Exception as e:
-            return {
-                "error": str(e),
-                "faces_found": 0,
-                "faces": []
-            }
+            logger.error(f"YOLO detection error: {e}")
+            return {"error": str(e), "faces_found": 0, "faces": []}
 
     def detect_faces_enhanced(self, image_data):
         """
-        Enhanced face detection using MediaPipe Face Mesh for precise detection
-        including hair and ears
+        Enhanced face detection using MediaPipe Face Mesh for precise detection.
+        This version provides a tighter bounding box around the face.
         """
+        logger.info("Starting enhanced MediaPipe face detection...")
         try:
             # Convert image data to numpy array
             if isinstance(image_data, bytes):
                 nparr = np.frombuffer(image_data, np.uint8)
                 image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             else:
-                # If it's already a PIL Image
                 image = cv2.cvtColor(np.array(image_data), cv2.COLOR_RGB2BGR)
 
-            # Convert BGR to RGB
+            logger.info(f"Enhanced MediaPipe processing image of shape: {image.shape}")
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # Use Face Mesh for precise detection
             results = self.face_mesh.process(image_rgb)
             
             faces = []
             if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # Convert landmarks to numpy array
-                    landmarks = []
-                    for landmark in face_landmarks.landmark:
-                        x = int(landmark.x * image.shape[1])
-                        y = int(landmark.y * image.shape[0])
-                        landmarks.append([x, y])
+                logger.info(f"Enhanced MediaPipe found {len(results.multi_face_landmarks)} faces")
+                for i, face_landmarks in enumerate(results.multi_face_landmarks):
+                    landmarks = np.array([(int(lm.x * image.shape[1]), int(lm.y * image.shape[0])) for lm in face_landmarks.landmark])
                     
-                    landmarks = np.array(landmarks)
+                    x_min, y_min = np.min(landmarks, axis=0)
+                    x_max, y_max = np.max(landmarks, axis=0)
                     
-                    # Calculate extended bounding box to include hair and ears
-                    x_coords = landmarks[:, 0]
-                    y_coords = landmarks[:, 1]
-                    
-                    # Get basic face bounds
-                    x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
-                    y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
-                    
-                    # Extend bounds to include hair and ears
+                    # Refined bounding box to be tighter around the face
                     face_width = x_max - x_min
                     face_height = y_max - y_min
                     
-                    # Extend horizontally for ears (about 20% on each side)
-                    ear_extension = int(face_width * 0.2)
-                    x_min = max(0, x_min - ear_extension)
-                    x_max = min(image.shape[1], x_max + ear_extension)
-                    
-                    # Extend vertically for hair (about 30% on top)
-                    hair_extension = int(face_height * 0.3)
-                    y_min = max(0, y_min - hair_extension)
-                    y_max = min(image.shape[0], y_max + int(face_height * 0.1))  # Small extension at bottom
-                    
-                    # Get key facial landmarks for reference
+                    # A more conservative extension
+                    x_min = max(0, x_min - int(face_width * 0.1))
+                    x_max = min(image.shape[1], x_max + int(face_width * 0.1))
+                    y_min = max(0, y_min - int(face_height * 0.2)) # A bit more for forehead/hair
+                    y_max = min(image.shape[0], y_max + int(face_height * 0.05))
+
                     key_landmarks = self._extract_key_landmarks(landmarks)
+                    pose_estimation = self.estimate_face_pose(landmarks, image.shape)
                     
                     faces.append({
-                        "bbox": {
-                            "x": x_min,
-                            "y": y_min,
-                            "width": x_max - x_min,
-                            "height": y_max - y_min
-                        },
-                        "confidence": 0.9,  # High confidence for mesh detection
+                        "bbox": {"x": x_min, "y": y_min, "width": x_max - x_min, "height": y_max - y_min},
+                        "confidence": 0.9,
                         "landmarks": landmarks.tolist(),
                         "key_landmarks": key_landmarks,
-                        "face_region": {
-                            "x": x_min,
-                            "y": y_min,
-                            "width": x_max - x_min,
-                            "height": y_max - y_min
-                        },
+                        "pose": pose_estimation,
                         "model": "mediapipe_enhanced"
                     })
+            else:
+                logger.info("Enhanced MediaPipe found no faces")
             
             return {
                 "faces_found": len(faces),
                 "faces": faces,
-                "image_shape": {
-                    "width": image.shape[1],
-                    "height": image.shape[0]
-                }
+                "image_shape": {"width": image.shape[1], "height": image.shape[0]}
             }
             
         except Exception as e:
-            return {
-                "error": str(e),
-                "faces_found": 0,
-                "faces": []
-            }
+            logger.error(f"Enhanced MediaPipe detection error: {e}")
+            return {"error": str(e), "faces_found": 0, "faces": []}
 
     def _extract_key_landmarks(self, landmarks):
-        """
-        Extract key facial landmarks for reference
-        """
-        # MediaPipe Face Mesh key landmark indices
+        """Extract key facial landmarks from the full landmark set."""
         key_indices = {
-            "nose_tip": 4,
-            "left_eye_center": 33,
-            "right_eye_center": 263,
-            "left_ear": 234,
-            "right_ear": 454,
-            "mouth_left": 61,
-            "mouth_right": 291,
-            "chin": 152,
-            "forehead": 10
+            "nose_tip": 4, "left_eye_center": 33, "right_eye_center": 263,
+            "left_ear": 234, "right_ear": 454, "mouth_left": 61,
+            "mouth_right": 291, "chin": 152, "forehead": 10
         }
-        
-        key_landmarks = {}
-        for name, idx in key_indices.items():
-            if idx < len(landmarks):
-                key_landmarks[name] = {
-                    "x": int(landmarks[idx][0]),
-                    "y": int(landmarks[idx][1])
-                }
-        
-        return key_landmarks
+        return {name: {"x": int(landmarks[idx][0]), "y": int(landmarks[idx][1])} 
+                for name, idx in key_indices.items() if idx < len(landmarks)}
 
     def detect_faces(self, image_data):
-        """
-        Original face detection method (kept for backward compatibility)
-        """
+        """Original face detection method for backward compatibility."""
+        logger.info("Starting standard MediaPipe face detection...")
         try:
             # Convert image data to numpy array
             if isinstance(image_data, bytes):
                 nparr = np.frombuffer(image_data, np.uint8)
                 image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             else:
-                # If it's already a PIL Image
                 image = cv2.cvtColor(np.array(image_data), cv2.COLOR_RGB2BGR)
 
-            # Convert BGR to RGB
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # Detect faces
             results = self.face_detection.process(image_rgb)
             
             faces = []
             if results.detections:
+                h, w, _ = image.shape
                 for detection in results.detections:
-                    # Get bounding box
                     bbox = detection.location_data.relative_bounding_box
-                    h, w, _ = image.shape
+                    x, y, width, height = int(bbox.xmin * w), int(bbox.ymin * h), int(bbox.width * w), int(bbox.height * h)
                     
-                    # Convert relative coordinates to absolute
-                    x = int(bbox.xmin * w)
-                    y = int(bbox.ymin * h)
-                    width = int(bbox.width * w)
-                    height = int(bbox.height * h)
-                    
-                    # Get confidence score
-                    confidence = detection.score[0]
-                    
-                    # Get key points (eyes, nose, mouth)
-                    keypoints = {}
-                    for keypoint in detection.location_data.relative_keypoints:
-                        keypoints[f"kp_{len(keypoints)}"] = {
-                            "x": keypoint.x * w,
-                            "y": keypoint.y * h
-                        }
+                    # Pose estimation logic remains the same
+                    pose_estimation = {"success": False}
+                    face_region = image[y:y+height, x:x+width]
+                    if face_region.size > 0:
+                        face_region_rgb = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)
+                        mesh_results = self.face_mesh.process(face_region_rgb)
+                        if mesh_results.multi_face_landmarks:
+                            landmarks = [(int(lm.x * width) + x, int(lm.y * height) + y) for lm in mesh_results.multi_face_landmarks[0].landmark]
+                            pose_estimation = self.estimate_face_pose(landmarks, image.shape)
                     
                     faces.append({
-                        "bbox": {
-                            "x": x,
-                            "y": y,
-                            "width": width,
-                            "height": height
-                        },
-                        "confidence": float(confidence),
-                        "keypoints": keypoints,
+                        "bbox": {"x": x, "y": y, "width": width, "height": height},
+                        "confidence": float(detection.score[0]),
+                        "pose": pose_estimation,
                         "model": "mediapipe_standard"
                     })
-            
             return {
                 "faces_found": len(faces),
                 "faces": faces,
-                "image_shape": {
-                    "width": image.shape[1],
-                    "height": image.shape[0]
-                }
+                "image_shape": {"width": image.shape[1], "height": image.shape[0]}
             }
-            
         except Exception as e:
-            return {
-                "error": str(e),
-                "faces_found": 0,
-                "faces": []
-            }
+            logger.error(f"Standard MediaPipe detection error: {e}")
+            return {"error": str(e), "faces_found": 0, "faces": []}
 
     def detect_faces_with_model(self, image_data, model: Literal["mediapipe_standard", "mediapipe_enhanced", "yolo"] = "mediapipe_enhanced"):
-        """
-        Detect faces using the specified model
-        """
+        """Detect faces using the specified model."""
+        logger.info(f"Detecting faces using model: {model}")
         if model == "yolo":
             return self.detect_faces_yolo(image_data)
         elif model == "mediapipe_enhanced":
             return self.detect_faces_enhanced(image_data)
-        else:  # mediapipe_standard
+        else:
             return self.detect_faces(image_data)
 
-    def draw_faces_on_image(self, image_data, use_enhanced=True, model="mediapipe_enhanced"):
-        """
-        Draw bounding boxes around detected faces and return the annotated image
-        """
+    def draw_faces_on_image(self, image_data, model="mediapipe_enhanced"):
+        """Draw bounding boxes and landmarks on the image."""
         try:
-            # Convert image data to numpy array
             if isinstance(image_data, bytes):
                 nparr = np.frombuffer(image_data, np.uint8)
                 image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             else:
                 image = cv2.cvtColor(np.array(image_data), cv2.COLOR_RGB2BGR)
 
-            # Convert BGR to RGB
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            detection_result = self.detect_faces_with_model(image, model)
             
-            if model == "yolo" and self.yolo_available:
-                # Use YOLO detection
-                results = self.yolo_model(image)
-                
-                # Draw YOLO detections
-                for result in results:
-                    boxes = result.boxes
-                    if boxes is not None:
-                        for box in boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            confidence = box.conf[0].cpu().numpy()
-                            
-                            # Draw bounding box
-                            cv2.rectangle(image_rgb, 
-                                        (int(x1), int(y1)), 
-                                        (int(x2), int(y2)), 
-                                        (0, 255, 0), 2)
-                            
-                            # Add confidence label
-                            cv2.putText(image_rgb, 
-                                      f"YOLO: {confidence:.2f}", 
-                                      (int(x1), int(y1)-10), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 
-                                      0.5, (0, 255, 0), 1)
-                
-                faces_found = sum(len(result.boxes) if result.boxes is not None else 0 for result in results)
-                
-            elif model == "mediapipe_enhanced":
-                # Use enhanced detection
-                results = self.face_mesh.process(image_rgb)
-                
-                # Draw enhanced detections
-                if results.multi_face_landmarks:
-                    for face_landmarks in results.multi_face_landmarks:
-                        # Draw face mesh
-                        self.mp_drawing.draw_landmarks(
-                            image_rgb, 
-                            face_landmarks, 
-                            self.mp_face_mesh.FACEMESH_TESSELATION,
-                            landmark_drawing_spec=None,
-                            connection_drawing_spec=self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1)
-                        )
-                        
-                        # Draw bounding box
-                        landmarks = []
-                        for landmark in face_landmarks.landmark:
-                            x = int(landmark.x * image.shape[1])
-                            y = int(landmark.y * image.shape[0])
-                            landmarks.append([x, y])
-                        
-                        landmarks = np.array(landmarks)
-                        x_coords = landmarks[:, 0]
-                        y_coords = landmarks[:, 1]
-                        
-                        # Calculate extended bounds
-                        x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
-                        y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
-                        
-                        face_width = x_max - x_min
-                        face_height = y_max - y_min
-                        
-                        # Extend bounds
-                        ear_extension = int(face_width * 0.2)
-                        hair_extension = int(face_height * 0.3)
-                        
-                        x_min = max(0, x_min - ear_extension)
-                        x_max = min(image.shape[1], x_max + ear_extension)
-                        y_min = max(0, y_min - hair_extension)
-                        y_max = min(image.shape[0], y_max + int(face_height * 0.1))
-                        
-                        # Draw extended bounding box
-                        cv2.rectangle(image_rgb, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
-                        cv2.putText(image_rgb, "Enhanced Detection", (x_min, y_min-10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-                
-                faces_found = len(results.multi_face_landmarks) if results.multi_face_landmarks else 0
-                
-            else:
-                # Use original detection
-                results = self.face_detection.process(image_rgb)
-                
-                # Draw original detections
-                if results.detections:
-                    for detection in results.detections:
-                        self.mp_drawing.draw_detection(image_rgb, detection)
-                
-                faces_found = len(results.detections) if results.detections else 0
+            if "error" in detection_result:
+                logger.error(f"Could not draw faces: {detection_result['error']}")
+                return {"error": detection_result['error'], "annotated_image": None, "faces_found": 0}
+
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             
-            # Convert back to BGR for OpenCV
-            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-            
-            # Convert to base64 for sending over API
-            _, buffer = cv2.imencode('.jpg', image_bgr)
+            for face in detection_result["faces"]:
+                bbox = face["bbox"]
+                x, y, w, h = bbox['x'], bbox['y'], bbox['width'], bbox['height']
+                
+                # Draw bounding box
+                cv2.rectangle(image_rgb, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                
+                # Add label
+                label = f"{face['model']}: {face['confidence']:.2f}"
+                cv2.putText(image_rgb, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                # Optionally draw landmarks for enhanced model
+                if model == "mediapipe_enhanced" and "landmarks" in face:
+                    for landmark in face["landmarks"]:
+                        cv2.circle(image_rgb, tuple(landmark), 1, (0, 0, 255), -1)
+
+            _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
             img_base64 = base64.b64encode(buffer).decode('utf-8')
             
             return {
                 "annotated_image": f"data:image/jpeg;base64,{img_base64}",
-                "faces_found": faces_found
+                "faces_found": detection_result["faces_found"]
             }
             
         except Exception as e:
-            return {
-                "error": str(e),
-                "annotated_image": None,
-                "faces_found": 0
-            } 
+            logger.error(f"Error drawing faces: {e}")
+            return {"error": str(e), "annotated_image": None, "faces_found": 0}
+
+    def _init_3d_face_model(self):
+        """Initialize 3D face model points for pose estimation."""
+        self.face_3d_model = np.array([
+            [0.0, 0.0, 0.0],           # Nose tip
+            [0.0, -330.0, -65.0],      # Chin
+            [-225.0, 170.0, -135.0],   # Left eye left corner
+            [225.0, 170.0, -135.0],    # Right eye right corner
+            [-150.0, -150.0, -125.0],  # Left mouth corner
+            [150.0, -150.0, -125.0]    # Right mouth corner
+        ], dtype=np.float64)
+
+    def estimate_face_pose(self, landmarks, image_shape):
+        """Estimate face pose (yaw, pitch, roll) from facial landmarks."""
+        try:
+            landmarks = np.array(landmarks, dtype=np.float64)
+            pose_landmark_indices = [1, 152, 226, 446, 61, 291]
+            
+            if landmarks.shape[0] < max(pose_landmark_indices) + 1:
+                return {"success": False, "error": "Not enough landmarks for pose estimation"}
+
+            face_2d = landmarks[pose_landmark_indices]
+            
+            h, w = image_shape[:2]
+            focal_length = w
+            camera_matrix = np.array([[focal_length, 0, w/2], [0, focal_length, h/2], [0, 0, 1]], dtype=np.float64)
+            dist_coeffs = np.zeros((4, 1))
+            
+            success, rotation_vec, _ = cv2.solvePnP(self.face_3d_model, face_2d, camera_matrix, dist_coeffs)
+            
+            if success:
+                rotation_matrix, _ = cv2.Rodrigues(rotation_vec)
+                sy = np.sqrt(rotation_matrix[0, 0]**2 + rotation_matrix[1, 0]**2)
+                
+                singular = sy < 1e-6
+                if not singular:
+                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
+                    yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+                    roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+                else:
+                    pitch = np.arctan2(-rotation_matrix[2, 0], sy)
+                    yaw = 0
+                    roll = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
+
+                return {
+                    "yaw": np.degrees(yaw), "pitch": np.degrees(pitch), "roll": np.degrees(roll),
+                    "confidence": self._calculate_pose_confidence(landmarks), "success": True
+                }
+            else:
+                return {"success": False, "error": "solvePnP failed"}
+        except Exception as e:
+            logger.error(f"Pose estimation error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _calculate_pose_confidence(self, landmarks):
+        """Calculate a confidence score for the pose estimation based on landmark spread."""
+        try:
+            x_coords, y_coords = landmarks[:, 0], landmarks[:, 1]
+            spread = np.std(x_coords) + np.std(y_coords)
+            
+            # Normalize spread to a confidence score (heuristic)
+            confidence = min(1.0, spread / 100.0) 
+            return confidence
+        except Exception:
+            return 0.5

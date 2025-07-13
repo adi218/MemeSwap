@@ -102,14 +102,25 @@ export default function GifSearch({ onGifSelect }) {
                         </div>
                       </div>
                     ) : (
-                      <img
-                        src={gif.proxy_url ? `http://127.0.0.1:8000${gif.proxy_url}` : gif.url}
-                        alt={gif.title || 'GIF'}
-                        className="w-full h-48 object-cover group-hover:scale-105 transition-transform duration-200"
-                        onError={() => handleImageError(gif.id)}
-                        onLoad={() => handleImageLoad(gif.id)}
-                        loading="lazy"
-                      />
+                      <div className="relative">
+                        <img
+                          src={gif.proxy_url ? `http://127.0.0.1:8000${gif.proxy_url}` : gif.url}
+                          alt={gif.title || 'GIF'}
+                          className="w-full h-auto max-h-48 object-contain group-hover:scale-105 transition-transform duration-200"
+                          style={{
+                            maxWidth: '100%',
+                            height: 'auto'
+                          }}
+                          onError={() => handleImageError(gif.id)}
+                          onLoad={() => handleImageLoad(gif.id)}
+                          loading="lazy"
+                        />
+                        {gif.width && gif.height && (
+                          <div className="absolute bottom-2 right-2 bg-black bg-opacity-50 text-white text-xs px-2 py-1 rounded">
+                            {gif.width} × {gif.height}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
