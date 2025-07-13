@@ -7,6 +7,7 @@ from typing import List, Tuple, Optional
 import logging
 import os
 import uuid
+from app.ml.config import ml_settings
 
 logger = logging.getLogger(__name__)
 
@@ -93,18 +94,30 @@ class FaceSwapService:
         
         return faces
     
-    def detect_faces_in_gif_with_mediapipe(self, gif_path: str) -> List[Tuple[np.ndarray, dict, int]]:
+    def detect_faces_in_gif_with_mediapipe(self, gif_path: str, confidence_threshold: float = None, drop_threshold: int = None) -> List[Tuple[np.ndarray, dict, int]]:
         """
         Detect faces in each frame of a GIF using MediaPipe enhanced detection.
         Returns list of (frame, face_info, frame_index) tuples.
+        
+        Args:
+            gif_path: Path to the GIF file
+            confidence_threshold: Minimum confidence for face detection (default from config)
+            drop_threshold: Number of consecutive frames without face detection before dropping overlay (default from config)
         """
         if not self.face_detection_service:
             raise ValueError("Face detection service not set")
+        
+        # Use config defaults if not provided
+        if confidence_threshold is None:
+            confidence_threshold = ml_settings.MEDIAPIPE_CONFIDENCE_THRESHOLD
+        if drop_threshold is None:
+            drop_threshold = ml_settings.MEDIAPIPE_DROP_THRESHOLD
         
         cap = cv2.VideoCapture(gif_path)
         frames_with_faces = []
         frame_index = 0
         last_face_info = None  # Store last detected face for interpolation
+        consecutive_no_face_frames = 0  # Counter for frames without face detection
         
         while True:
             ret, frame = cap.read()
@@ -114,32 +127,58 @@ class FaceSwapService:
             # Use MediaPipe enhanced detection on this frame
             faces = self.extract_face_with_mediapipe(frame)
             
+            # Check if we have a valid face with sufficient confidence
+            valid_face_detected = False
             if faces:
-                # Face detected in this frame
                 for face_image, face_info in faces:
-                    frames_with_faces.append((frame, face_info, frame_index))
-                    last_face_info = face_info  # Update last known face
-            elif last_face_info is not None:
-                # No face detected, but we have a previous face - use interpolation
-                # Slightly adjust the bounding box position based on frame movement
-                interpolated_face_info = last_face_info.copy()
-                frames_with_faces.append((frame, interpolated_face_info, frame_index))
-                logger.info(f"Frame {frame_index}: No face detected, using interpolated face from previous frame")
+                    confidence = face_info.get("confidence", 0.0)
+                    if confidence >= confidence_threshold:
+                        # Valid face detected
+                        frames_with_faces.append((frame, face_info, frame_index))
+                        last_face_info = face_info  # Update last known face
+                        consecutive_no_face_frames = 0  # Reset counter
+                        valid_face_detected = True
+                        logger.info(f"Frame {frame_index}: Valid face detected (confidence: {confidence:.3f})")
+                        break
+            
+            if not valid_face_detected:
+                consecutive_no_face_frames += 1
+                logger.info(f"Frame {frame_index}: No valid face detected (confidence below {confidence_threshold})")
+                
+                if last_face_info is not None and consecutive_no_face_frames <= drop_threshold:
+                    # Use interpolated face from previous frame
+                    interpolated_face_info = last_face_info.copy()
+                    frames_with_faces.append((frame, interpolated_face_info, frame_index))
+                    logger.info(f"Frame {frame_index}: Using interpolated face (consecutive no-face frames: {consecutive_no_face_frames}/{drop_threshold})")
+                elif consecutive_no_face_frames > drop_threshold:
+                    # Drop the overlay after threshold exceeded
+                    logger.info(f"Frame {frame_index}: Dropping face overlay (consecutive no-face frames: {consecutive_no_face_frames} > {drop_threshold})")
+                    # Don't add this frame to frames_with_faces, so no overlay will be applied
             
             frame_index += 1
         
         cap.release()
         return frames_with_faces
     
-    def save_cropped_faces(self, faces: List[Tuple[np.ndarray, dict]], prefix: str, output_dir: str = "debug_faces") -> List[str]:
+    def save_cropped_faces(self, faces: List[Tuple[np.ndarray, dict]], prefix: str, output_dir: str = None) -> List[str]:
         """
         Save cropped faces to disk for debugging.
         Returns list of saved file paths.
         """
+        if not ml_settings.FACE_SWAP_DEBUG_SAVE_FACES:
+            return []
+        
+        if output_dir is None:
+            output_dir = "debug_faces"
+        
         os.makedirs(output_dir, exist_ok=True)
         saved_paths = []
         
-        for i, (face_image, face_info) in enumerate(faces):
+        # Limit the number of faces to save for debugging
+        max_faces = ml_settings.FACE_SWAP_DEBUG_MAX_FACES
+        faces_to_save = faces[:max_faces]
+        
+        for i, (face_image, face_info) in enumerate(faces_to_save):
             # Generate unique filename
             unique_id = str(uuid.uuid4())[:8]
             filename = f"{prefix}_face_{i}_{unique_id}.jpg"
@@ -152,6 +191,7 @@ class FaceSwapService:
             logger.info(f"Saved {prefix} face {i} to {filepath}")
             logger.info(f"Face info: bbox={face_info['bbox']}, confidence={face_info['confidence']:.3f}")
         
+        logger.info(f"Saved {len(saved_paths)} sample faces from {prefix}")
         return saved_paths
     
     def warp_face(self, source_image: np.ndarray, source_face_info: dict,
@@ -244,12 +284,25 @@ class FaceSwapService:
         
         return blended_frame
     
-    def swap_face_on_gif(self, source_image_path: str, target_gif_path: str) -> str:
+    def swap_face_on_gif(self, source_image_path: str, target_gif_path: str, 
+                         confidence_threshold: float = None, drop_threshold: int = None) -> str:
         """
-        Swap faces from source image onto target GIF using YOLO detection.
+        Swap faces from source image onto target GIF using MediaPipe enhanced detection.
         Returns path to the output GIF.
+        
+        Args:
+            source_image_path: Path to the source image
+            target_gif_path: Path to the target GIF
+            confidence_threshold: Minimum confidence for face detection (default from config)
+            drop_threshold: Number of consecutive frames without face detection before dropping overlay (default from config)
         """
         try:
+            # Use config defaults if not provided
+            if confidence_threshold is None:
+                confidence_threshold = ml_settings.FACE_SWAP_DEFAULT_CONFIDENCE
+            if drop_threshold is None:
+                drop_threshold = ml_settings.FACE_SWAP_DEFAULT_DROP_THRESHOLD
+            
             # Load source image
             source_image = cv2.imread(source_image_path)
             if source_image is None:
@@ -268,7 +321,11 @@ class FaceSwapService:
             source_face, source_face_info = source_faces[0]
             
             # Detect faces in target GIF using MediaPipe enhanced detection
-            frames_with_faces = self.detect_faces_in_gif_with_mediapipe(target_gif_path)
+            frames_with_faces = self.detect_faces_in_gif_with_mediapipe(
+                target_gif_path, 
+                confidence_threshold=confidence_threshold, 
+                drop_threshold=drop_threshold
+            )
             if not frames_with_faces:
                 raise ValueError("No faces detected in target GIF")
             

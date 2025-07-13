@@ -4,6 +4,8 @@ const FaceSwap = ({ selectedGif, uploadedFace }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.3); // Default from backend config
+  const [dropThreshold, setDropThreshold] = useState(3); // Default from backend config
 
   const handleFaceSwap = async () => {
     if (!uploadedFace || !selectedGif) {
@@ -19,10 +21,13 @@ const FaceSwap = ({ selectedGif, uploadedFace }) => {
       const formData = new FormData();
       formData.append('source_image', uploadedFace.file);
 
-      const response = await fetch(`http://127.0.0.1:8000/api/face/swap-face-on-gif?gif_url=${encodeURIComponent(selectedGif.url)}`, {
-        method: 'POST',
-        body: formData,
-      });
+      const response = await fetch(
+        `http://127.0.0.1:8000/api/face/swap-face-on-gif?gif_url=${encodeURIComponent(selectedGif.url)}&confidence_threshold=${confidenceThreshold}&drop_threshold=${dropThreshold}`, 
+        {
+          method: 'POST',
+          body: formData,
+        }
+      );
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -43,10 +48,62 @@ const FaceSwap = ({ selectedGif, uploadedFace }) => {
       {/* Model Info */}
       <div className="mb-6">
         <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-          <h3 className="font-medium text-purple-800 mb-2">🤖 YOLO Face Detection</h3>
+          <h3 className="font-medium text-purple-800 mb-2">🤖 MediaPipe Enhanced Face Detection</h3>
           <p className="text-sm text-purple-700">
-            Using YOLO for robust face detection and swapping. Cropped faces are saved to <code>debug_faces</code> directory for debugging.
+            Using MediaPipe enhanced detection for precise face detection and swapping. Cropped faces are saved to <code>debug_faces</code> directory for debugging.
           </p>
+        </div>
+      </div>
+
+      {/* Configuration Options */}
+      <div className="mb-6">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <h3 className="font-medium text-blue-800 mb-3">⚙️ Detection Settings</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-blue-700 mb-2">
+                Confidence Threshold: {confidenceThreshold}
+              </label>
+              <input
+                type="range"
+                min="0.1"
+                max="0.9"
+                step="0.1"
+                value={confidenceThreshold}
+                onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
+                className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer"
+              />
+              <div className="flex justify-between text-xs text-blue-600 mt-1">
+                <span>0.1 (More Sensitive)</span>
+                <span>0.9 (Less Sensitive)</span>
+              </div>
+              <p className="text-xs text-blue-600 mt-1">
+                Lower values detect faces more easily but may include false positives
+              </p>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-blue-700 mb-2">
+                Drop Threshold: {dropThreshold} frames
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="10"
+                step="1"
+                value={dropThreshold}
+                onChange={(e) => setDropThreshold(parseInt(e.target.value))}
+                className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer"
+              />
+              <div className="flex justify-between text-xs text-blue-600 mt-1">
+                <span>1 frame</span>
+                <span>10 frames</span>
+              </div>
+              <p className="text-xs text-blue-600 mt-1">
+                Number of consecutive frames without face detection before dropping overlay
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -143,7 +200,7 @@ const FaceSwap = ({ selectedGif, uploadedFace }) => {
           {isLoading ? (
             <div className="flex items-center justify-center space-x-2">
               <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-              <span>Creating your meme with YOLO...</span>
+              <span>Creating your meme with MediaPipe...</span>
             </div>
           ) : (
             '🎭 Generate Face Swap!'
@@ -209,6 +266,8 @@ const FaceSwap = ({ selectedGif, uploadedFace }) => {
                 <h5 className="font-medium text-blue-800 mb-2">🔍 Debug Information</h5>
                 <div className="text-sm text-blue-700 space-y-1">
                   <p><strong>Model Used:</strong> {result.model_used}</p>
+                  <p><strong>Confidence Threshold:</strong> {result.confidence_threshold || confidenceThreshold}</p>
+                  <p><strong>Drop Threshold:</strong> {result.drop_threshold || dropThreshold} frames</p>
                   <p><strong>Source Image:</strong> {result.source_image}</p>
                   <p><strong>Target GIF:</strong> {result.target_gif}</p>
                   <p><strong>Output Path:</strong> {result.output_path}</p>

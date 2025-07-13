@@ -7,6 +7,7 @@ import logging
 from app.utils.file_utils import validate_image_file, get_file_extension, generate_unique_filename, save_uploaded_file
 from app.ml.face_swap import FaceSwapService
 from app.ml.face_detection import FaceDetectionService
+from app.ml.config import ml_settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,18 @@ router = APIRouter()
 @router.post("/swap-face-on-gif")
 async def swap_face_on_gif(
     source_image: UploadFile = File(...),
-    gif_url: str = Query(..., description="URL of the target GIF")
+    gif_url: str = Query(..., description="URL of the target GIF"),
+    confidence_threshold: float = Query(None, description="Minimum confidence for face detection (0.0-1.0)"),
+    drop_threshold: int = Query(None, description="Number of consecutive frames without face detection before dropping overlay")
 ):
     """
-    Swap a face from source image onto a GIF using YOLO detection.
+    Swap a face from source image onto a GIF using MediaPipe enhanced detection.
     
     Args:
         source_image: The source image containing the face to swap
         gif_url: URL of the target GIF to swap faces onto
+        confidence_threshold: Minimum confidence for face detection (default: 0.3)
+        drop_threshold: Number of consecutive frames without face detection before dropping overlay (default: 3)
     
     Returns:
         JSON response with the face-swapped GIF data
@@ -35,6 +40,15 @@ async def swap_face_on_gif(
     logger.info(f"=== FACE SWAP REQUEST ===")
     logger.info(f"GIF URL: {gif_url}")
     logger.info(f"Source image: {source_image.filename}, size: {source_image.size}")
+    
+    # Use config defaults if not provided
+    if confidence_threshold is None:
+        confidence_threshold = ml_settings.FACE_SWAP_DEFAULT_CONFIDENCE
+    if drop_threshold is None:
+        drop_threshold = ml_settings.FACE_SWAP_DEFAULT_DROP_THRESHOLD
+    
+    logger.info(f"Confidence threshold: {confidence_threshold}")
+    logger.info(f"Drop threshold: {drop_threshold}")
     
     # Validate source file
     validate_image_file(source_image)
@@ -60,10 +74,15 @@ async def swap_face_on_gif(
         gif_path = save_uploaded_file(gif_response.content, gif_filename)
         logger.info(f"Saved GIF to: {gif_path}")
         
-        # Perform face swap using YOLO detection
-        logger.info("Starting face swap with YOLO detection")
+        # Perform face swap using MediaPipe enhanced detection
+        logger.info("Starting face swap with MediaPipe enhanced detection")
         
-        output_path = face_swap_service.swap_face_on_gif(source_path, gif_path)
+        output_path = face_swap_service.swap_face_on_gif(
+            source_path, 
+            gif_path, 
+            confidence_threshold=confidence_threshold,
+            drop_threshold=drop_threshold
+        )
         logger.info(f"Face swap completed, output saved to: {output_path}")
         
         # Read the output file and convert to base64
@@ -81,7 +100,9 @@ async def swap_face_on_gif(
             "output_data": output_base64,
             "source_image": source_filename,
             "target_gif": gif_filename,
-            "model_used": "yolo"
+            "model_used": "mediapipe_enhanced",
+            "confidence_threshold": confidence_threshold,
+            "drop_threshold": drop_threshold
         }
         
     except requests.RequestException as e:

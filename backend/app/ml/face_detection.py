@@ -6,6 +6,7 @@ import io
 import base64
 import logging
 from typing import Literal
+from app.ml.config import ml_settings
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -21,17 +22,17 @@ class FaceDetectionService:
         # Initialize MediaPipe face detection and mesh
         logger.info("Initializing MediaPipe face detection...")
         self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=0, min_detection_confidence=0.5
+            model_selection=0, min_detection_confidence=ml_settings.MEDIAPIPE_DETECTION_CONFIDENCE
         )
         
         # Enhanced face mesh for precise detection
         logger.info("Initializing MediaPipe face mesh...")
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             static_image_mode=True,
-            max_num_faces=10,
+            max_num_faces=ml_settings.MAX_FACES_PER_IMAGE,
             refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=ml_settings.MEDIAPIPE_FACE_MESH_CONFIDENCE,
+            min_tracking_confidence=ml_settings.MEDIAPIPE_FACE_MESH_CONFIDENCE
         )
         
         # Initialize YOLO face detection
@@ -47,7 +48,7 @@ class FaceDetectionService:
         logger.info("Attempting to load YOLO model...")
         try:
             # YOLO face detection model path
-            model_path = "models/yolov8n-face.pt"
+            model_path = ml_settings.YOLO_MODEL_PATH
             
             # Try to load YOLO model if available
             try:

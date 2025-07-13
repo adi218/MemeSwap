@@ -36,13 +36,7 @@ class Settings(BaseSettings):
         "image/gif"
     ]
     
-    # Face Detection Configuration
-    FACE_DETECTION_CONFIDENCE: float = 0.5
-    MAX_FACES_PER_IMAGE: int = 10
-    
-    # Face Swap Configuration
-    FACE_SWAP_QUALITY: int = 85  # GIF quality
-    FACE_SWAP_DURATION: int = 100  # Frame duration in ms
+
     
     class Config:
         env_file = ".env"
